@@ -77,10 +77,16 @@ This fork adds Japanese and multilingual local embedding support on top of upstr
 - mean pooling support for retrieval-oriented embedding models
 - `tools/export_ruri_pt_large_onnx.py` to export `ruri-pt-large` to ONNX with memvid-compatible filenames
 - fallback `ruri` tokenizer support from `vocab.txt` when `tokenizer.json` is not available
+- packaged model distribution via [sungo-ganpare/memvid-embedding-models](https://huggingface.co/sungo-ganpare/memvid-embedding-models)
 
 Current limitation:
 
 - `ruri-pt-large` still uses a fallback tokenizer implementation rather than the model's full MeCab-based tokenizer, so Japanese tokenization is improved but not fully identical to the original Hugging Face tokenizer.
+
+Model licenses:
+
+- `multilingual-e5-large`: MIT License, based on `intfloat/multilingual-e5-large`
+- `ruri-pt-large`: Apache License 2.0, based on `cl-nagoya/ruri-pt-large`
 
     
 ## What are Smart Frames?
@@ -356,7 +362,21 @@ println!("{}", result.text);
 
 ## Text Embedding Models
 
-The `vec` feature includes local text embedding support using ONNX models. Before using local text embeddings, you need to download the model files manually.
+The `vec` feature includes local text embedding support using ONNX models. This fork packages the Japanese and multilingual model assets in [sungo-ganpare/memvid-embedding-models](https://huggingface.co/sungo-ganpare/memvid-embedding-models) and includes setup scripts that copy the files into memvid's expected cache directory.
+
+### Recommended: one-command setup
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_japanese_models.ps1
+```
+
+Linux / macOS:
+
+```bash
+bash ./scripts/setup_japanese_models.sh
+```
 
 ### Quick Start: BGE-small (Recommended)
 
@@ -411,18 +431,32 @@ curl -L 'https://huggingface.co/thenlper/gte-large/resolve/main/tokenizer.json' 
   -o ~/.cache/memvid/text-models/gte-large_tokenizer.json
 ```
 
-**multilingual-e5-large** (1024 dimensions, multilingual retrieval):
+**multilingual-e5-large** (1024 dimensions, multilingual retrieval, packaged in this fork's HF repo):
 ```bash
-curl -L 'https://huggingface.co/Xenova/multilingual-e5-large/resolve/main/onnx/model.onnx' \
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_japanese_models.ps1
+
+# Or download manually:
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/multilingual-e5-large.onnx' \
   -o ~/.cache/memvid/text-models/multilingual-e5-large.onnx
-curl -L 'https://huggingface.co/intfloat/multilingual-e5-large/resolve/main/tokenizer.json' \
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/model.onnx_data' \
+  -o ~/.cache/memvid/text-models/model.onnx_data
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/multilingual-e5-large_tokenizer.json' \
   -o ~/.cache/memvid/text-models/multilingual-e5-large_tokenizer.json
 ```
 
-**ruri-pt-large** (1024 dimensions, Japanese retrieval):
+**ruri-pt-large** (1024 dimensions, Japanese retrieval, packaged in this fork's HF repo):
 ```bash
-pip install "optimum[onnxruntime]" transformers huggingface_hub
-python tools/export_ruri_pt_large_onnx.py
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_japanese_models.ps1
+
+# Or download manually:
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/ruri-pt-large.onnx' \
+  -o ~/.cache/memvid/text-models/ruri-pt-large.onnx
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/vocab.txt' \
+  -o ~/.cache/memvid/text-models/vocab.txt
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/tokenizer_config.json' \
+  -o ~/.cache/memvid/text-models/tokenizer_config.json
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/special_tokens_map.json' \
+  -o ~/.cache/memvid/text-models/special_tokens_map.json
 ```
 
 ### Usage in Code
@@ -455,8 +489,9 @@ let embedder = LocalTextEmbedder::new(config)?;
 
 For retrieval-oriented models such as `multilingual-e5-large` and `ruri-pt-large`, use `encode_query()` and `encode_passage()` so the recommended prefixes are applied correctly.
 
-The helper script `tools/export_ruri_pt_large_onnx.py` exports `cl-nagoya/ruri-pt-large` with Optimum's `feature-extraction` task and saves the files using memvid's expected names.
-Because `ruri-pt-large` does not publish a `tokenizer.json`, memvid falls back to `vocab.txt`-based WordPiece tokenization for this model.
+The setup scripts download packaged model files from [sungo-ganpare/memvid-embedding-models](https://huggingface.co/sungo-ganpare/memvid-embedding-models).
+The helper script `tools/export_ruri_pt_large_onnx.py` remains available if you want to regenerate `ruri-pt-large.onnx` yourself.
+Because `ruri-pt-large` does not publish a `tokenizer.json`, memvid falls back to `vocab.txt`-based tokenization for this model.
 
 See `examples/text_embedding.rs` for a complete example with similarity computation and search ranking.
 

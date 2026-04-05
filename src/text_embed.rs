@@ -142,6 +142,7 @@ pub const MODEL_UNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Default cache capacity (number of embeddings to cache)
 const DEFAULT_CACHE_CAPACITY: usize = 1000;
+const HF_MODELS_REPO: &str = "https://huggingface.co/sungo-ganpare/memvid-embedding-models";
 
 // ============================================================================
 // Model Registry
@@ -229,8 +230,12 @@ pub static TEXT_EMBED_MODELS: &[TextEmbedModelInfo] = &[
     // multilingual-e5-large: multilingual retrieval model with mean pooling and prefixes
     TextEmbedModelInfo {
         name: "multilingual-e5-large",
-        model_url: Some("https://huggingface.co/Xenova/multilingual-e5-large/resolve/main/onnx/model.onnx"),
-        tokenizer_url: Some("https://huggingface.co/intfloat/multilingual-e5-large/resolve/main/tokenizer.json"),
+        model_url: Some(
+            "https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/multilingual-e5-large.onnx",
+        ),
+        tokenizer_url: Some(
+            "https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/multilingual-e5-large_tokenizer.json",
+        ),
         dims: 1024,
         max_tokens: 512,
         pooling: PoolingStrategy::Mean,
@@ -241,8 +246,10 @@ pub static TEXT_EMBED_MODELS: &[TextEmbedModelInfo] = &[
     // Ruri pt-large: Japanese sentence embedding model, ONNX must be exported manually
     TextEmbedModelInfo {
         name: "ruri-pt-large",
-        model_url: None,
-        tokenizer_url: Some("https://huggingface.co/cl-nagoya/ruri-pt-large/resolve/main/tokenizer.json"),
+        model_url: Some(
+            "https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/ruri-pt-large.onnx",
+        ),
+        tokenizer_url: None,
         dims: 1024,
         max_tokens: 512,
         pooling: PoolingStrategy::Mean,
@@ -824,6 +831,14 @@ impl LocalTextEmbedder {
                 tokenizer_url,
                 path.display()
             )
+        } else if self.model_info.name == "ruri-pt-large" {
+            format!(
+                "Tokenizer JSON not found at {}. Model '{}' uses vocab.txt fallback assets instead of tokenizer.json.\n\
+                 Download the Japanese model pack from {} or run scripts/setup_japanese_models.ps1 / scripts/setup_japanese_models.sh.",
+                path.display(),
+                self.model_info.name,
+                HF_MODELS_REPO
+            )
         } else {
             format!(
                 "Tokenizer not found at {}. Please place tokenizer.json for model '{}' at this path.",
@@ -846,9 +861,10 @@ impl LocalTextEmbedder {
 
         Err(MemvidError::EmbeddingFailed {
             reason: format!(
-                "Tokenizer fallback vocab not found at {}. Place vocab.txt in the models directory for model '{}'.",
+                "Tokenizer fallback vocab not found at {}. Place vocab.txt in the models directory for model '{}' or download the packaged files from {}/tree/main/ruri-pt-large.",
                 path.display(),
-                self.model_info.name
+                self.model_info.name,
+                HF_MODELS_REPO
             )
             .into(),
         })

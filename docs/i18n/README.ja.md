@@ -73,10 +73,16 @@
 - 検索向け埋め込みモデルに mean pooling を追加
 - `tools/export_ruri_pt_large_onnx.py` を追加し、`ruri-pt-large` を ONNX として出力可能にした
 - `tokenizer.json` が無い `ruri` 向けに `vocab.txt` ベースの fallback tokenizer を追加
+- [sungo-ganpare/memvid-embedding-models](https://huggingface.co/sungo-ganpare/memvid-embedding-models) からモデルをまとめて取得できるようにした
 
 現状の制約:
 
 - `ruri-pt-large` は Hugging Face の完全な MeCab ベース tokenizer ではなく fallback 実装を使うため、日本語 tokenization は改善済みですが完全一致ではありません。
+
+モデルライセンス:
+
+- `multilingual-e5-large`: MIT License (`intfloat/multilingual-e5-large` 由来)
+- `ruri-pt-large`: Apache License 2.0 (`cl-nagoya/ruri-pt-large` 由来)
 
 ## Memvidとは？
 
@@ -327,7 +333,21 @@ cargo run --example test_whisper --features whisper
 
 ## テキスト埋め込みモデル
 
-`vec` 機能は、ONNXモデルを使用したローカルでのテキスト埋め込みをサポートしています。利用前にモデルファイルを手動でダウンロードする必要があります。
+`vec` 機能は、ONNXモデルを使用したローカルでのテキスト埋め込みをサポートしています。このフォークでは [sungo-ganpare/memvid-embedding-models](https://huggingface.co/sungo-ganpare/memvid-embedding-models) から日本語向けモデルをまとめて取得でき、memvid が読むキャッシュ配置までスクリプトで自動化できます。
+
+### 推奨: 1コマンドでセットアップ
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_japanese_models.ps1
+```
+
+Linux / macOS:
+
+```bash
+bash ./scripts/setup_japanese_models.sh
+```
 
 ### 推奨：BGE-small (デフォルト)
 
@@ -385,20 +405,34 @@ curl -L 'https://huggingface.co/thenlper/gte-large/resolve/main/tokenizer.json' 
   -o ~/.cache/memvid/text-models/gte-large_tokenizer.json
 ```
 
-**multilingual-e5-large** (1024次元、多言語検索向け):
+**multilingual-e5-large** (1024次元、多言語検索向け、fork の HF repo で配布):
 
 ```bash
-curl -L 'https://huggingface.co/Xenova/multilingual-e5-large/resolve/main/onnx/model.onnx' \
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_japanese_models.ps1
+
+# 手動ダウンロードの場合:
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/multilingual-e5-large.onnx' \
   -o ~/.cache/memvid/text-models/multilingual-e5-large.onnx
-curl -L 'https://huggingface.co/intfloat/multilingual-e5-large/resolve/main/tokenizer.json' \
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/model.onnx_data' \
+  -o ~/.cache/memvid/text-models/model.onnx_data
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/multilingual-e5-large/multilingual-e5-large_tokenizer.json' \
   -o ~/.cache/memvid/text-models/multilingual-e5-large_tokenizer.json
 ```
 
-**ruri-pt-large** (1024次元、日本語検索向け):
+**ruri-pt-large** (1024次元、日本語検索向け、fork の HF repo で配布):
 
 ```bash
-pip install "optimum[onnxruntime]" transformers huggingface_hub
-python tools/export_ruri_pt_large_onnx.py
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_japanese_models.ps1
+
+# 手動ダウンロードの場合:
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/ruri-pt-large.onnx' \
+  -o ~/.cache/memvid/text-models/ruri-pt-large.onnx
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/vocab.txt' \
+  -o ~/.cache/memvid/text-models/vocab.txt
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/tokenizer_config.json' \
+  -o ~/.cache/memvid/text-models/tokenizer_config.json
+curl -L 'https://huggingface.co/sungo-ganpare/memvid-embedding-models/resolve/main/ruri-pt-large/special_tokens_map.json' \
+  -o ~/.cache/memvid/text-models/special_tokens_map.json
 ```
 
 ### 使用例
@@ -431,8 +465,9 @@ let embedder = LocalTextEmbedder::new(config)?;
 
 `multilingual-e5-large` と `ruri-pt-large` は検索向けの学習をしているため、クエリ側は `encode_query()`、文書側は `encode_passage()` を使うのが前提です。
 
-補助スクリプト `tools/export_ruri_pt_large_onnx.py` は、Optimum の `feature-extraction` export を使って `ruri-pt-large.onnx` と `ruri-pt-large_tokenizer.json` を memvid 向けの名前で生成します。
-`ruri-pt-large` は `tokenizer.json` を公開していないため、このモデルだけ memvid 側で `vocab.txt` ベースの WordPiece tokenizer にフォールバックします。
+セットアップスクリプトは [sungo-ganpare/memvid-embedding-models](https://huggingface.co/sungo-ganpare/memvid-embedding-models) から必要ファイルを取得します。
+補助スクリプト `tools/export_ruri_pt_large_onnx.py` は、自前で `ruri-pt-large.onnx` を再生成したい場合に引き続き使えます。
+`ruri-pt-large` は `tokenizer.json` を公開していないため、このモデルだけ memvid 側で `vocab.txt` ベースの fallback tokenizer にフォールバックします。
 
 類似性の計算と検索ランキングを含む完全な例については、`examples/text_embedding.rs` を参照してください。
 
