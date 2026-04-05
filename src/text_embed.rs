@@ -29,14 +29,11 @@ use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::Tensor;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokenizers::models::wordpiece::WordPiece;
-use tokenizers::normalizers::bert::BertNormalizer;
-use tokenizers::pre_tokenizers::bert::BertPreTokenizer;
-use tokenizers::processors::bert::BertProcessing;
 use tokenizers::tokenizer::{Tokenizer as HfTokenizer, TruncationParams};
 use tokenizers::{
     PaddingDirection, PaddingParams, PaddingStrategy, TruncationDirection, TruncationStrategy,
@@ -503,6 +500,251 @@ pub struct LocalTextEmbedder {
 
 enum TokenizerBackend {
     Hf(HfTokenizer),
+    RuriFallback(RuriFallbackTokenizer),
+}
+
+#[derive(Debug, Clone)]
+struct RuriFallbackTokenizer {
+    vocab: HashMap<String, u32>,
+    cls_id: u32,
+    sep_id: u32,
+    unk_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct SegmentationScore {
+    token_count: usize,
+    segment_count: usize,
+}
+
+impl SegmentationScore {
+    fn new(token_count: usize, segment_count: usize) -> Self {
+        Self {
+            token_count,
+            segment_count,
+        }
+    }
+
+    fn better_than(&self, other: &Self) -> bool {
+        self.token_count < other.token_count
+            || (self.token_count == other.token_count && self.segment_count > other.segment_count)
+    }
+}
+
+impl RuriFallbackTokenizer {
+    fn from_vocab_file(vocab_path: &PathBuf) -> Result<Self> {
+        let vocab_text = fs::read_to_string(vocab_path).map_err(|e| MemvidError::EmbeddingFailed {
+            reason: format!("Failed to read fallback vocab tokenizer: {}", e).into(),
+        })?;
+
+        let vocab = vocab_text
+            .lines()
+            .enumerate()
+            .map(|(idx, token)| (token.to_string(), idx as u32))
+            .collect::<HashMap<_, _>>();
+
+        Self::from_vocab_map(vocab)
+    }
+
+    fn from_vocab_map(vocab: HashMap<String, u32>) -> Result<Self> {
+        let cls_id = *vocab.get("[CLS]").ok_or_else(|| MemvidError::EmbeddingFailed {
+            reason: "Fallback tokenizer vocab is missing [CLS]".into(),
+        })?;
+        let sep_id = *vocab.get("[SEP]").ok_or_else(|| MemvidError::EmbeddingFailed {
+            reason: "Fallback tokenizer vocab is missing [SEP]".into(),
+        })?;
+        let unk_id = *vocab.get("[UNK]").ok_or_else(|| MemvidError::EmbeddingFailed {
+            reason: "Fallback tokenizer vocab is missing [UNK]".into(),
+        })?;
+
+        Ok(Self {
+            vocab,
+            cls_id,
+            sep_id,
+            unk_id,
+        })
+    }
+
+    fn encode(&self, text: &str, max_length: usize) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+        let mut input_ids = Vec::with_capacity(max_length.max(2));
+        input_ids.push(i64::from(self.cls_id));
+
+        for segment in self.segment_text(text) {
+            match self.wordpiece_tokenize(&segment) {
+                Some(token_ids) => input_ids.extend(token_ids.into_iter().map(i64::from)),
+                None => input_ids.push(i64::from(self.unk_id)),
+            }
+        }
+
+        input_ids.push(i64::from(self.sep_id));
+
+        if input_ids.len() > max_length {
+            input_ids.truncate(max_length);
+            if let Some(last) = input_ids.last_mut() {
+                *last = i64::from(self.sep_id);
+            }
+        }
+
+        let attention_mask = vec![1_i64; input_ids.len()];
+        let token_type_ids = vec![0_i64; input_ids.len()];
+        (input_ids, attention_mask, token_type_ids)
+    }
+
+    fn segment_text(&self, text: &str) -> Vec<String> {
+        let normalized = self.normalize_text(text);
+        let mut segments = Vec::new();
+        let mut current = String::new();
+
+        for ch in normalized.chars() {
+            if ch.is_whitespace() {
+                if !current.is_empty() {
+                    segments.extend(self.segment_run(&current));
+                    current.clear();
+                }
+                continue;
+            }
+
+            if Self::is_japanese_punctuation(ch) || ch.is_ascii_punctuation() {
+                if !current.is_empty() {
+                    segments.extend(self.segment_run(&current));
+                    current.clear();
+                }
+                segments.push(ch.to_string());
+                continue;
+            }
+
+            current.push(ch);
+        }
+
+        if !current.is_empty() {
+            segments.extend(self.segment_run(&current));
+        }
+
+        segments
+    }
+
+    fn normalize_text(&self, text: &str) -> String {
+        text.chars()
+            .filter_map(|ch| {
+                if Self::is_control(ch) {
+                    None
+                } else if ch.is_whitespace() {
+                    Some(' ')
+                } else {
+                    Some(ch)
+                }
+            })
+            .collect()
+    }
+
+    fn segment_run(&self, run: &str) -> Vec<String> {
+        if run.is_empty() {
+            return Vec::new();
+        }
+
+        let char_offsets = Self::char_offsets(run);
+        let len = char_offsets.len() - 1;
+        let max_piece_chars = 24.min(len.max(1));
+        let mut best: Vec<Option<(SegmentationScore, usize)>> = vec![None; len + 1];
+        best[len] = Some((SegmentationScore::new(0, 0), len));
+
+        for start in (0..len).rev() {
+            let mut best_choice: Option<(SegmentationScore, usize)> = None;
+            let max_end = (start + max_piece_chars).min(len);
+
+            for end in (start + 1)..=max_end {
+                let piece = &run[char_offsets[start]..char_offsets[end]];
+                let token_count = self
+                    .wordpiece_tokenize(piece)
+                    .map_or(usize::MAX / 4, |tokens| tokens.len());
+
+                if let Some((tail_score, _)) = &best[end] {
+                    let score =
+                        SegmentationScore::new(token_count + tail_score.token_count, 1 + tail_score.segment_count);
+
+                    match &best_choice {
+                        Some((current_best, _)) if !score.better_than(current_best) => {}
+                        _ => best_choice = Some((score, end)),
+                    }
+                }
+            }
+
+            best[start] = best_choice.or_else(|| {
+                let fallback_end = start + 1;
+                best[fallback_end].as_ref().map(|(tail_score, _)| {
+                    (
+                        SegmentationScore::new(1 + tail_score.token_count, 1 + tail_score.segment_count),
+                        fallback_end,
+                    )
+                })
+            });
+        }
+
+        let mut result = Vec::new();
+        let mut pos = 0;
+        while pos < len {
+            let next = best[pos].as_ref().map(|(_, end)| *end).unwrap_or(pos + 1);
+            result.push(run[char_offsets[pos]..char_offsets[next]].to_string());
+            pos = next;
+        }
+        result
+    }
+
+    fn wordpiece_tokenize(&self, piece: &str) -> Option<Vec<u32>> {
+        if piece.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let char_offsets = Self::char_offsets(piece);
+        let len = char_offsets.len() - 1;
+        let mut start = 0;
+        let mut ids = Vec::new();
+
+        while start < len {
+            let mut found = None;
+            for end in ((start + 1)..=len).rev() {
+                let sub = &piece[char_offsets[start]..char_offsets[end]];
+                let candidate = if start == 0 {
+                    sub.to_string()
+                } else {
+                    format!("##{sub}")
+                };
+
+                if let Some(&id) = self.vocab.get(&candidate) {
+                    found = Some((id, end));
+                    break;
+                }
+            }
+
+            match found {
+                Some((id, end)) => {
+                    ids.push(id);
+                    start = end;
+                }
+                None => return None,
+            }
+        }
+
+        Some(ids)
+    }
+
+    fn char_offsets(text: &str) -> Vec<usize> {
+        let mut offsets = text.char_indices().map(|(idx, _)| idx).collect::<Vec<_>>();
+        offsets.push(text.len());
+        offsets
+    }
+
+    fn is_control(ch: char) -> bool {
+        !matches!(ch, '\t' | '\n' | '\r') && ch.is_control()
+    }
+
+    fn is_japanese_punctuation(ch: char) -> bool {
+        matches!(
+            ch,
+            '。' | '、' | '「' | '」' | '『' | '』' | '（' | '）' | '［' | '］' | '【' | '】' | '｛'
+                | '｝' | '〈' | '〉' | '《' | '》' | '！' | '？' | '：' | '；' | '，' | '．'
+        )
+    }
 }
 
 impl LocalTextEmbedder {
@@ -646,33 +888,8 @@ impl LocalTextEmbedder {
         Ok(())
     }
 
-    fn load_wordpiece_fallback_tokenizer(&self, vocab_path: &PathBuf) -> Result<HfTokenizer> {
-        let model = WordPiece::from_file(&vocab_path.to_string_lossy())
-            .unk_token("[UNK]".to_string())
-            .continuing_subword_prefix("##".to_string())
-            .build()
-            .map_err(|e| MemvidError::EmbeddingFailed {
-                reason: format!("Failed to load fallback vocab tokenizer: {}", e).into(),
-            })?;
-
-        let mut tokenizer = HfTokenizer::new(model);
-        tokenizer.with_normalizer(Some(BertNormalizer::new(true, true, Some(false), false)));
-        tokenizer.with_pre_tokenizer(Some(BertPreTokenizer));
-
-        let sep_id = tokenizer.token_to_id("[SEP]").ok_or_else(|| MemvidError::EmbeddingFailed {
-            reason: "Fallback tokenizer vocab is missing [SEP]".into(),
-        })?;
-        let cls_id = tokenizer.token_to_id("[CLS]").ok_or_else(|| MemvidError::EmbeddingFailed {
-            reason: "Fallback tokenizer vocab is missing [CLS]".into(),
-        })?;
-
-        tokenizer.with_post_processor(Some(BertProcessing::new(
-            ("[SEP]".to_string(), sep_id),
-            ("[CLS]".to_string(), cls_id),
-        )));
-
-        self.configure_tokenizer(&mut tokenizer)?;
-        Ok(tokenizer)
+    fn load_ruri_fallback_tokenizer(&self, vocab_path: &PathBuf) -> Result<RuriFallbackTokenizer> {
+        RuriFallbackTokenizer::from_vocab_file(vocab_path)
     }
 
     /// Load ONNX session lazily
@@ -751,8 +968,8 @@ impl LocalTextEmbedder {
                     "tokenizer.json missing for ruri-pt-large, falling back to vocab.txt-based WordPiece tokenizer"
                 );
                 let vocab_path = self.ensure_vocab_file()?;
-                let tokenizer = self.load_wordpiece_fallback_tokenizer(&vocab_path)?;
-                TokenizerBackend::Hf(tokenizer)
+                let tokenizer = self.load_ruri_fallback_tokenizer(&vocab_path)?;
+                TokenizerBackend::RuriFallback(tokenizer)
             }
             Err(err) => return Err(err),
         };
@@ -852,6 +1069,7 @@ impl LocalTextEmbedder {
                         .collect();
                     (input_ids, attention_mask, token_type_ids)
                 }
+                TokenizerBackend::RuriFallback(tokenizer) => tokenizer.encode(text, self.model_info.max_tokens),
             }
         };
         let max_length = input_ids.len();
@@ -1191,6 +1409,7 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_model_registry() {
@@ -1294,6 +1513,66 @@ mod tests {
         ];
         let pooled = embedder.pool_embedding(&flat, &[1, 1, 0], 2).unwrap();
         assert_eq!(pooled, vec![2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_ruri_fallback_segment_text_prefers_japanese_word_boundaries() {
+        let vocab = HashMap::from([
+            ("[PAD]".to_string(), 0),
+            ("[UNK]".to_string(), 1),
+            ("[CLS]".to_string(), 2),
+            ("[SEP]".to_string(), 3),
+            ("名古屋".to_string(), 4),
+            ("で".to_string(), 5),
+            ("城".to_string(), 6),
+            ("や".to_string(), 7),
+            ("歴史".to_string(), 8),
+            ("を".to_string(), 9),
+            ("見".to_string(), 10),
+            ("たい".to_string(), 11),
+            ("##たい".to_string(), 12),
+        ]);
+        let tokenizer = RuriFallbackTokenizer::from_vocab_map(vocab).unwrap();
+
+        let segments = tokenizer.segment_text("名古屋で城や歴史を見たい");
+        assert_eq!(segments, vec!["名古屋", "で", "城", "や", "歴史", "を", "見", "たい"]);
+    }
+
+    #[test]
+    fn test_ruri_fallback_segment_text_breaks_equal_cost_hiragana_suffix() {
+        let vocab = HashMap::from([
+            ("[PAD]".to_string(), 0),
+            ("[UNK]".to_string(), 1),
+            ("[CLS]".to_string(), 2),
+            ("[SEP]".to_string(), 3),
+            ("見".to_string(), 4),
+            ("たい".to_string(), 5),
+            ("##たい".to_string(), 6),
+        ]);
+        let tokenizer = RuriFallbackTokenizer::from_vocab_map(vocab).unwrap();
+
+        let segments = tokenizer.segment_text("見たい");
+        assert_eq!(segments, vec!["見", "たい"]);
+    }
+
+    #[test]
+    fn test_ruri_fallback_segment_text_splits_hiragana_run_when_cost_is_equal() {
+        let vocab = HashMap::from([
+            ("[PAD]".to_string(), 0),
+            ("[UNK]".to_string(), 1),
+            ("[CLS]".to_string(), 2),
+            ("[SEP]".to_string(), 3),
+            ("しゃ".to_string(), 4),
+            ("で".to_string(), 5),
+            ("##ち".to_string(), 6),
+            ("##ほ".to_string(), 7),
+            ("##こ".to_string(), 8),
+            ("##で".to_string(), 9),
+        ]);
+        let tokenizer = RuriFallbackTokenizer::from_vocab_map(vocab).unwrap();
+
+        let segments = tokenizer.segment_text("しゃちほこで");
+        assert_eq!(segments, vec!["しゃちほこ", "で"]);
     }
 
     #[test]
