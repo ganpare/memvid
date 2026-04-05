@@ -56,8 +56,27 @@
 データベースを必要とせず、永続化、バージョン管理、ポータブル性を備えたメモリを実現します。
 </p>
 
+<p align="center">
+  <a href="../../README.md">English README</a>
+</p>
+
 <h2 align="center">⭐️ スターで応援お願いします ⭐️</h2>
 </p>
+
+## このフォークで追加した点
+
+このフォークは upstream の memvid に対して、日本語と多言語のローカル埋め込み対応を追加しています。
+
+- `multilingual-e5-large` に対応
+- `cl-nagoya/ruri-pt-large` に対応
+- 検索向けモデル用に `encode_query()` / `encode_passage()` を追加
+- 検索向け埋め込みモデルに mean pooling を追加
+- `tools/export_ruri_pt_large_onnx.py` を追加し、`ruri-pt-large` を ONNX として出力可能にした
+- `tokenizer.json` が無い `ruri` 向けに `vocab.txt` ベースの fallback tokenizer を追加
+
+現状の制約:
+
+- `ruri-pt-large` は Hugging Face の完全な MeCab ベース tokenizer ではなく fallback 実装を使うため、日本語 tokenization は改善済みですが完全一致ではありません。
 
 ## Memvidとは？
 

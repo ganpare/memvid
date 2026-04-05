@@ -15,6 +15,10 @@
   Persistent, versioned, and portable memory, without databases.
 </p>
 
+<p align="center">
+  <a href="docs/i18n/README.ja.md">日本語版 README</a>
+</p>
+
 <!-- NAV:START -->
 <p align="center">
   <a href="https://www.memvid.com">Website</a>
