@@ -63,6 +63,21 @@ Instead of running complex RAG pipelines or server-based vector databases, Memvi
 
 The result is a model-agnostic, infrastructure-free memory layer that gives AI agents persistent, long-term memory they can carry anywhere.
 
+## Fork Differences
+
+This fork adds Japanese and multilingual local embedding support on top of upstream memvid.
+
+- `multilingual-e5-large` support for multilingual retrieval
+- `cl-nagoya/ruri-pt-large` support for Japanese retrieval and similarity
+- `encode_query()` / `encode_passage()` helpers for retrieval models that require query and passage prefixes
+- mean pooling support for retrieval-oriented embedding models
+- `tools/export_ruri_pt_large_onnx.py` to export `ruri-pt-large` to ONNX with memvid-compatible filenames
+- fallback `ruri` tokenizer support from `vocab.txt` when `tokenizer.json` is not available
+
+Current limitation:
+
+- `ruri-pt-large` still uses a fallback tokenizer implementation rather than the model's full MeCab-based tokenizer, so Japanese tokenization is improved but not fully identical to the original Hugging Face tokenizer.
+
     
 ## What are Smart Frames?
 
