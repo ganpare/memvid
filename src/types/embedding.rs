@@ -107,6 +107,28 @@ impl EmbeddingConfig {
             normalize: true,
         }
     }
+
+    /// Create config for multilingual E5 large
+    #[must_use]
+    pub fn multilingual_e5_large() -> Self {
+        Self {
+            model: "intfloat/multilingual-e5-large".to_string(),
+            dimension: 1024,
+            batch_size: Some(8),
+            normalize: true,
+        }
+    }
+
+    /// Create config for Ruri pt-large
+    #[must_use]
+    pub fn ruri_pt_large() -> Self {
+        Self {
+            model: "cl-nagoya/ruri-pt-large".to_string(),
+            dimension: 1024,
+            batch_size: Some(8),
+            normalize: true,
+        }
+    }
 }
 
 /// Trait for embedding providers that generate vector embeddings from text.
@@ -253,6 +275,12 @@ mod tests {
 
         let bge = EmbeddingConfig::bge_small();
         assert_eq!(bge.dimension, 384);
+
+        let e5 = EmbeddingConfig::multilingual_e5_large();
+        assert_eq!(e5.dimension, 1024);
+
+        let ruri = EmbeddingConfig::ruri_pt_large();
+        assert_eq!(ruri.dimension, 1024);
     }
 
     /// Integration test for LocalTextEmbedder

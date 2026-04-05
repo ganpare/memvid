@@ -7,9 +7,8 @@
 //! ## Supported Models
 //!
 //! - **BGE-small-en-v1.5** (default): 384 dimensions, fast and efficient
-//! - **BGE-base-en-v1.5**: 768 dimensions, better quality
-//! - **nomic-embed-text-v1.5**: 768 dimensions, versatile
-//! - **GTE-large**: 1024 dimensions, highest quality
+//! - **multilingual-e5-large**: 1024 dimensions, multilingual retrieval
+//! - **ruri-pt-large**: 1024 dimensions, Japanese retrieval and similarity
 //!
 //! ## Usage
 //!
@@ -34,7 +33,11 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokenizers::tokenizer::{Tokenizer, TruncationParams};
+use tokenizers::models::wordpiece::WordPiece;
+use tokenizers::normalizers::bert::BertNormalizer;
+use tokenizers::pre_tokenizers::bert::BertPreTokenizer;
+use tokenizers::processors::bert::BertProcessing;
+use tokenizers::tokenizer::{Tokenizer as HfTokenizer, TruncationParams};
 use tokenizers::{
     PaddingDirection, PaddingParams, PaddingStrategy, TruncationDirection, TruncationStrategy,
 };
@@ -137,9 +140,6 @@ fn ensure_ort_init() {
 
 /// Default directory for storing text embedding models
 
-/// Maximum sequence length for text embedding models (standard for BERT-based models)
-const MAX_SEQUENCE_LENGTH: usize = 512;
-
 /// Model unload timeout - unload after 5 minutes of inactivity
 pub const MODEL_UNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -156,15 +156,27 @@ pub struct TextEmbedModelInfo {
     /// Model identifier
     pub name: &'static str,
     /// HuggingFace URL for ONNX model
-    pub model_url: &'static str,
+    pub model_url: Option<&'static str>,
     /// HuggingFace URL for tokenizer
-    pub tokenizer_url: &'static str,
+    pub tokenizer_url: Option<&'static str>,
     /// Embedding dimensions
     pub dims: u32,
     /// Maximum token length
     pub max_tokens: usize,
+    /// Pooling strategy for sentence embedding extraction
+    pub pooling: PoolingStrategy,
+    /// Optional prefix recommended for queries
+    pub query_prefix: Option<&'static str>,
+    /// Optional prefix recommended for passages/documents
+    pub passage_prefix: Option<&'static str>,
     /// Whether this is the default model
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolingStrategy {
+    Cls,
+    Mean,
 }
 
 /// Available text embedding models registry
@@ -172,37 +184,73 @@ pub static TEXT_EMBED_MODELS: &[TextEmbedModelInfo] = &[
     // BGE-small: Default, fast, good quality (384d)
     TextEmbedModelInfo {
         name: "bge-small-en-v1.5",
-        model_url: "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx",
-        tokenizer_url: "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json",
+        model_url: Some("https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx"),
+        tokenizer_url: Some("https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json"),
         dims: 384,
         max_tokens: 512,
+        pooling: PoolingStrategy::Cls,
+        query_prefix: None,
+        passage_prefix: None,
         is_default: true,
     },
     // BGE-base: Better quality, still fast (768d)
     TextEmbedModelInfo {
         name: "bge-base-en-v1.5",
-        model_url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/onnx/model.onnx",
-        tokenizer_url: "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json",
+        model_url: Some("https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/onnx/model.onnx"),
+        tokenizer_url: Some("https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json"),
         dims: 768,
         max_tokens: 512,
+        pooling: PoolingStrategy::Cls,
+        query_prefix: None,
+        passage_prefix: None,
         is_default: false,
     },
     // Nomic: Versatile, good for various tasks (768d)
     TextEmbedModelInfo {
         name: "nomic-embed-text-v1.5",
-        model_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx",
-        tokenizer_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json",
+        model_url: Some("https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model.onnx"),
+        tokenizer_url: Some("https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json"),
         dims: 768,
         max_tokens: 512,
+        pooling: PoolingStrategy::Cls,
+        query_prefix: None,
+        passage_prefix: None,
         is_default: false,
     },
     // GTE-large: Highest quality, slower (1024d)
     TextEmbedModelInfo {
         name: "gte-large",
-        model_url: "https://huggingface.co/thenlper/gte-large/resolve/main/onnx/model.onnx",
-        tokenizer_url: "https://huggingface.co/thenlper/gte-large/resolve/main/tokenizer.json",
+        model_url: Some("https://huggingface.co/thenlper/gte-large/resolve/main/onnx/model.onnx"),
+        tokenizer_url: Some("https://huggingface.co/thenlper/gte-large/resolve/main/tokenizer.json"),
         dims: 1024,
         max_tokens: 512,
+        pooling: PoolingStrategy::Cls,
+        query_prefix: None,
+        passage_prefix: None,
+        is_default: false,
+    },
+    // multilingual-e5-large: multilingual retrieval model with mean pooling and prefixes
+    TextEmbedModelInfo {
+        name: "multilingual-e5-large",
+        model_url: Some("https://huggingface.co/Xenova/multilingual-e5-large/resolve/main/onnx/model.onnx"),
+        tokenizer_url: Some("https://huggingface.co/intfloat/multilingual-e5-large/resolve/main/tokenizer.json"),
+        dims: 1024,
+        max_tokens: 512,
+        pooling: PoolingStrategy::Mean,
+        query_prefix: Some("query: "),
+        passage_prefix: Some("passage: "),
+        is_default: false,
+    },
+    // Ruri pt-large: Japanese sentence embedding model, ONNX must be exported manually
+    TextEmbedModelInfo {
+        name: "ruri-pt-large",
+        model_url: None,
+        tokenizer_url: Some("https://huggingface.co/cl-nagoya/ruri-pt-large/resolve/main/tokenizer.json"),
+        dims: 1024,
+        max_tokens: 512,
+        pooling: PoolingStrategy::Mean,
+        query_prefix: Some("クエリ: "),
+        passage_prefix: Some("文章: "),
         is_default: false,
     },
 ];
@@ -298,6 +346,30 @@ impl TextEmbedConfig {
             model_name: "gte-large".to_string(),
             ..Default::default()
         }
+    }
+
+    /// Create config for multilingual E5 large
+    #[must_use]
+    pub fn multilingual_e5_large() -> Self {
+        Self {
+            model_name: "multilingual-e5-large".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Create config for Ruri Japanese embedding model
+    #[must_use]
+    pub fn ruri_pt_large() -> Self {
+        Self {
+            model_name: "ruri-pt-large".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Create config optimized for Japanese content
+    #[must_use]
+    pub fn japanese() -> Self {
+        Self::ruri_pt_large()
     }
 }
 
@@ -422,11 +494,15 @@ pub struct LocalTextEmbedder {
     /// Lazy-loaded ONNX session
     session: Mutex<Option<Session>>,
     /// Lazy-loaded tokenizer
-    tokenizer: Mutex<Option<Tokenizer>>,
+    tokenizer: Mutex<Option<TokenizerBackend>>,
     /// Last time the model was used (for idle unloading)
     last_used: Mutex<Instant>,
     /// Embedding cache (optional)
     cache: Mutex<Option<EmbeddingCache>>,
+}
+
+enum TokenizerBackend {
+    Hf(HfTokenizer),
 }
 
 impl LocalTextEmbedder {
@@ -466,18 +542,26 @@ impl LocalTextEmbedder {
             return Ok(path);
         }
 
-        // Model file doesn't exist
-        Err(MemvidError::EmbeddingFailed {
-            reason: format!(
+        let reason = if let Some(model_url) = self.model_info.model_url {
+            format!(
                 "Text embedding model not found at {}. Please download manually:\n\
                  mkdir -p {}\n\
                  curl -L '{}' -o '{}'",
                 path.display(),
                 self.config.models_dir.display(),
-                self.model_info.model_url,
+                model_url,
                 path.display()
             )
-            .into(),
+        } else {
+            format!(
+                "Text embedding model not found at {}. Model '{}' does not publish an official ONNX weight file in this integration. Export the model to ONNX yourself and save it at this path.",
+                path.display(),
+                self.model_info.name
+            )
+        };
+
+        Err(MemvidError::EmbeddingFailed {
+            reason: reason.into(),
         })
     }
 
@@ -490,17 +574,105 @@ impl LocalTextEmbedder {
             return Ok(path);
         }
 
-        // Tokenizer file doesn't exist
-        Err(MemvidError::EmbeddingFailed {
-            reason: format!(
+        let reason = if let Some(tokenizer_url) = self.model_info.tokenizer_url {
+            format!(
                 "Tokenizer not found at {}. Please download manually:\n\
                  curl -L '{}' -o '{}'",
                 path.display(),
-                self.model_info.tokenizer_url,
+                tokenizer_url,
                 path.display()
+            )
+        } else {
+            format!(
+                "Tokenizer not found at {}. Please place tokenizer.json for model '{}' at this path.",
+                path.display(),
+                self.model_info.name
+            )
+        };
+
+        Err(MemvidError::EmbeddingFailed {
+            reason: reason.into(),
+        })
+    }
+
+    fn ensure_vocab_file(&self) -> Result<PathBuf> {
+        let path = self.config.models_dir.join("vocab.txt");
+
+        if path.exists() {
+            return Ok(path);
+        }
+
+        Err(MemvidError::EmbeddingFailed {
+            reason: format!(
+                "Tokenizer fallback vocab not found at {}. Place vocab.txt in the models directory for model '{}'.",
+                path.display(),
+                self.model_info.name
             )
             .into(),
         })
+    }
+
+    fn configure_tokenizer(&self, tokenizer: &mut HfTokenizer) -> Result<()> {
+        let max_sequence_length = self.model_info.max_tokens;
+
+        let pad_id = tokenizer
+            .token_to_id("[PAD]")
+            .or_else(|| tokenizer.token_to_id("<pad>"))
+            .unwrap_or(0);
+        let pad_token = tokenizer
+            .id_to_token(pad_id)
+            .unwrap_or_else(|| "[PAD]".to_string());
+
+        tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            direction: PaddingDirection::Right,
+            pad_to_multiple_of: None,
+            pad_id,
+            pad_type_id: 0,
+            pad_token,
+        }));
+
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: max_sequence_length,
+                strategy: TruncationStrategy::LongestFirst,
+                stride: 0,
+                direction: TruncationDirection::Right,
+            }))
+            .map_err(|e| MemvidError::EmbeddingFailed {
+                reason: format!("Failed to apply truncation config: {}", e).into(),
+            })?;
+
+        Ok(())
+    }
+
+    fn load_wordpiece_fallback_tokenizer(&self, vocab_path: &PathBuf) -> Result<HfTokenizer> {
+        let model = WordPiece::from_file(&vocab_path.to_string_lossy())
+            .unk_token("[UNK]".to_string())
+            .continuing_subword_prefix("##".to_string())
+            .build()
+            .map_err(|e| MemvidError::EmbeddingFailed {
+                reason: format!("Failed to load fallback vocab tokenizer: {}", e).into(),
+            })?;
+
+        let mut tokenizer = HfTokenizer::new(model);
+        tokenizer.with_normalizer(Some(BertNormalizer::new(true, true, Some(false), false)));
+        tokenizer.with_pre_tokenizer(Some(BertPreTokenizer));
+
+        let sep_id = tokenizer.token_to_id("[SEP]").ok_or_else(|| MemvidError::EmbeddingFailed {
+            reason: "Fallback tokenizer vocab is missing [SEP]".into(),
+        })?;
+        let cls_id = tokenizer.token_to_id("[CLS]").ok_or_else(|| MemvidError::EmbeddingFailed {
+            reason: "Fallback tokenizer vocab is missing [CLS]".into(),
+        })?;
+
+        tokenizer.with_post_processor(Some(BertProcessing::new(
+            ("[SEP]".to_string(), sep_id),
+            ("[CLS]".to_string(), cls_id),
+        )));
+
+        self.configure_tokenizer(&mut tokenizer)?;
+        Ok(tokenizer)
     }
 
     /// Load ONNX session lazily
@@ -560,38 +732,32 @@ impl LocalTextEmbedder {
             return Ok(());
         }
 
-        let tokenizer_path = self.ensure_tokenizer_file()?;
+        let backend = match self.ensure_tokenizer_file() {
+            Ok(tokenizer_path) => {
+                tracing::debug!(path = %tokenizer_path.display(), "Loading tokenizer");
 
-        tracing::debug!(path = %tokenizer_path.display(), "Loading tokenizer");
+                let mut tokenizer = HfTokenizer::from_file(&tokenizer_path).map_err(|e| {
+                    MemvidError::EmbeddingFailed {
+                        reason: format!("Failed to load tokenizer: {}", e).into(),
+                    }
+                })?;
 
-        let mut tokenizer =
-            Tokenizer::from_file(&tokenizer_path).map_err(|e| MemvidError::EmbeddingFailed {
-                reason: format!("Failed to load tokenizer: {}", e).into(),
-            })?;
+                self.configure_tokenizer(&mut tokenizer)?;
 
-        // Configure padding to max sequence length
-        tokenizer.with_padding(Some(PaddingParams {
-            strategy: PaddingStrategy::Fixed(MAX_SEQUENCE_LENGTH),
-            direction: PaddingDirection::Right,
-            pad_to_multiple_of: None,
-            pad_id: 0,
-            pad_type_id: 0,
-            pad_token: "[PAD]".to_string(),
-        }));
+                TokenizerBackend::Hf(tokenizer)
+            }
+            Err(_err) if self.model_info.name == "ruri-pt-large" => {
+                tracing::warn!(
+                    "tokenizer.json missing for ruri-pt-large, falling back to vocab.txt-based WordPiece tokenizer"
+                );
+                let vocab_path = self.ensure_vocab_file()?;
+                let tokenizer = self.load_wordpiece_fallback_tokenizer(&vocab_path)?;
+                TokenizerBackend::Hf(tokenizer)
+            }
+            Err(err) => return Err(err),
+        };
 
-        // Configure truncation
-        tokenizer
-            .with_truncation(Some(TruncationParams {
-                max_length: MAX_SEQUENCE_LENGTH,
-                strategy: TruncationStrategy::LongestFirst,
-                stride: 0,
-                direction: TruncationDirection::Right,
-            }))
-            .map_err(|e| MemvidError::EmbeddingFailed {
-                reason: format!("Failed to apply truncation config: {}", e).into(),
-            })?;
-
-        *tokenizer_guard = Some(tokenizer);
+        *tokenizer_guard = Some(backend);
         tracing::info!(model = %self.model_info.name, "Tokenizer loaded");
 
         Ok(())
@@ -604,8 +770,31 @@ impl LocalTextEmbedder {
         hasher.finish()
     }
 
+    fn maybe_prefixed_text(&self, text: &str, prefix: Option<&str>) -> String {
+        match prefix {
+            Some(prefix) if !text.starts_with(prefix) => format!("{prefix}{text}"),
+            _ => text.to_string(),
+        }
+    }
+
     /// Encode text to embedding (with caching support)
     pub fn encode_text(&self, text: &str) -> Result<Vec<f32>> {
+        self.encode_prepared_text(text)
+    }
+
+    /// Encode a retrieval query using the model's recommended query prefix when available.
+    pub fn encode_query(&self, text: &str) -> Result<Vec<f32>> {
+        let prepared = self.maybe_prefixed_text(text, self.model_info.query_prefix);
+        self.encode_prepared_text(&prepared)
+    }
+
+    /// Encode a retrieval passage using the model's recommended passage prefix when available.
+    pub fn encode_passage(&self, text: &str) -> Result<Vec<f32>> {
+        let prepared = self.maybe_prefixed_text(text, self.model_info.passage_prefix);
+        self.encode_prepared_text(&prepared)
+    }
+
+    fn encode_prepared_text(&self, text: &str) -> Result<Vec<f32>> {
         // 1. Check cache first
         if let Ok(mut cache_guard) = self.cache.lock() {
             if let Some(ref mut cache) = *cache_guard {
@@ -628,7 +817,7 @@ impl LocalTextEmbedder {
         self.load_tokenizer()?;
 
         // Tokenize the text
-        let encoding = {
+        let (input_ids, attention_mask, token_type_ids) = {
             let tokenizer_guard = self
                 .tokenizer
                 .lock()
@@ -640,24 +829,31 @@ impl LocalTextEmbedder {
                         reason: "Tokenizer not loaded".into(),
                     })?;
 
-            tokenizer
-                .encode(text, true)
-                .map_err(|e| MemvidError::EmbeddingFailed {
-                    reason: format!("Text tokenization failed: {}", e).into(),
-                })?
-        };
+            match tokenizer {
+                TokenizerBackend::Hf(tokenizer) => {
+                    let encoding =
+                        tokenizer
+                            .encode(text, true)
+                            .map_err(|e| MemvidError::EmbeddingFailed {
+                                reason: format!("Text tokenization failed: {}", e).into(),
+                            })?;
 
-        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|id| *id as i64).collect();
-        let attention_mask: Vec<i64> = encoding
-            .get_attention_mask()
-            .iter()
-            .map(|id| *id as i64)
-            .collect();
-        let token_type_ids: Vec<i64> = encoding
-            .get_type_ids()
-            .iter()
-            .map(|id| *id as i64)
-            .collect();
+                    let input_ids: Vec<i64> =
+                        encoding.get_ids().iter().map(|id| *id as i64).collect();
+                    let attention_mask: Vec<i64> = encoding
+                        .get_attention_mask()
+                        .iter()
+                        .map(|id| *id as i64)
+                        .collect();
+                    let token_type_ids: Vec<i64> = encoding
+                        .get_type_ids()
+                        .iter()
+                        .map(|id| *id as i64)
+                        .collect();
+                    (input_ids, attention_mask, token_type_ids)
+                }
+            }
+        };
         let max_length = input_ids.len();
 
         // Create input arrays
@@ -667,7 +863,7 @@ impl LocalTextEmbedder {
             }
         })?;
         let attention_mask_array =
-            Array::from_shape_vec((1, max_length), attention_mask).map_err(|e| {
+            Array::from_shape_vec((1, max_length), attention_mask.clone()).map_err(|e| {
                 MemvidError::EmbeddingFailed {
                     reason: format!("Failed to create attention_mask array: {}", e).into(),
                 }
@@ -770,10 +966,9 @@ impl LocalTextEmbedder {
                     reason: format!("Failed to extract embeddings: {}", e).into(),
                 })?;
 
-        // For BERT-style models, use [CLS] token embedding (first token)
-        // The output shape is typically [batch_size, sequence_length, hidden_size]
         let embedding_dim = self.model_info.dims as usize;
-        let embedding: Vec<f32> = data.iter().take(embedding_dim).copied().collect();
+        let flat: Vec<f32> = data.iter().copied().collect();
+        let embedding = self.pool_embedding(&flat, &attention_mask, embedding_dim)?;
 
         if embedding.iter().any(|v| !v.is_finite()) {
             return Err(MemvidError::EmbeddingFailed {
@@ -799,6 +994,68 @@ impl LocalTextEmbedder {
         }
 
         Ok(normalized)
+    }
+
+    fn pool_embedding(
+        &self,
+        flat: &[f32],
+        attention_mask: &[i64],
+        embedding_dim: usize,
+    ) -> Result<Vec<f32>> {
+        if flat.len() == embedding_dim {
+            return Ok(flat.to_vec());
+        }
+
+        if flat.len() < embedding_dim || !flat.len().is_multiple_of(embedding_dim) {
+            return Err(MemvidError::EmbeddingFailed {
+                reason: format!(
+                    "Unexpected embedding output shape for model {}: {} values for {} dims",
+                    self.model_info.name,
+                    flat.len(),
+                    embedding_dim
+                )
+                .into(),
+            });
+        }
+
+        let sequence_length = flat.len() / embedding_dim;
+
+        match self.model_info.pooling {
+            PoolingStrategy::Cls => Ok(flat.iter().take(embedding_dim).copied().collect()),
+            PoolingStrategy::Mean => {
+                let usable_len = sequence_length.min(attention_mask.len());
+                let mut pooled = vec![0.0_f32; embedding_dim];
+                let mut token_count = 0.0_f32;
+
+                for token_idx in 0..usable_len {
+                    if attention_mask[token_idx] == 0 {
+                        continue;
+                    }
+                    let start = token_idx * embedding_dim;
+                    let end = start + embedding_dim;
+                    for (dst, src) in pooled.iter_mut().zip(&flat[start..end]) {
+                        *dst += *src;
+                    }
+                    token_count += 1.0;
+                }
+
+                if token_count <= 0.0 {
+                    return Err(MemvidError::EmbeddingFailed {
+                        reason: format!(
+                            "Attention mask was empty for model {}",
+                            self.model_info.name
+                        )
+                        .into(),
+                    });
+                }
+
+                for value in &mut pooled {
+                    *value /= token_count;
+                }
+
+                Ok(pooled)
+            }
+        }
     }
 
     /// Encode multiple texts in batch
@@ -937,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_model_registry() {
-        assert_eq!(TEXT_EMBED_MODELS.len(), 4);
+        assert_eq!(TEXT_EMBED_MODELS.len(), 6);
 
         let default_model = default_text_model_info();
         assert_eq!(default_model.name, "bge-small-en-v1.5");
@@ -958,6 +1215,15 @@ mod tests {
 
         let gte = get_text_model_info("gte-large");
         assert_eq!(gte.dims, 1024);
+
+        let e5 = get_text_model_info("multilingual-e5-large");
+        assert_eq!(e5.dims, 1024);
+        assert_eq!(e5.max_tokens, 512);
+        assert_eq!(e5.pooling, PoolingStrategy::Mean);
+
+        let ruri = get_text_model_info("ruri-pt-large");
+        assert_eq!(ruri.dims, 1024);
+        assert_eq!(ruri.pooling, PoolingStrategy::Mean);
 
         // Unknown model should return default
         let unknown = get_text_model_info("unknown-model");
@@ -981,6 +1247,15 @@ mod tests {
 
         let gte = TextEmbedConfig::gte_large();
         assert_eq!(gte.model_name, "gte-large");
+
+        let e5 = TextEmbedConfig::multilingual_e5_large();
+        assert_eq!(e5.model_name, "multilingual-e5-large");
+
+        let ruri = TextEmbedConfig::ruri_pt_large();
+        assert_eq!(ruri.model_name, "ruri-pt-large");
+
+        let japanese = TextEmbedConfig::japanese();
+        assert_eq!(japanese.model_name, "ruri-pt-large");
     }
 
     #[test]
@@ -996,6 +1271,29 @@ mod tests {
         let zero = vec![0.0, 0.0];
         let normalized_zero = l2_normalize(&zero);
         assert_eq!(normalized_zero, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_query_prefix_is_applied_once() {
+        let embedder = LocalTextEmbedder::new(TextEmbedConfig::multilingual_e5_large()).unwrap();
+        let prepared = embedder.maybe_prefixed_text("南瓜の家常做法", embedder.model_info.query_prefix);
+        assert_eq!(prepared, "query: 南瓜の家常做法");
+
+        let already_prefixed =
+            embedder.maybe_prefixed_text("query: 南瓜の家常做法", embedder.model_info.query_prefix);
+        assert_eq!(already_prefixed, "query: 南瓜の家常做法");
+    }
+
+    #[test]
+    fn test_mean_pooling_uses_attention_mask() {
+        let embedder = LocalTextEmbedder::new(TextEmbedConfig::multilingual_e5_large()).unwrap();
+        let flat = vec![
+            1.0, 2.0, // token 0
+            3.0, 4.0, // token 1
+            100.0, 200.0, // token 2 (masked)
+        ];
+        let pooled = embedder.pool_embedding(&flat, &[1, 1, 0], 2).unwrap();
+        assert_eq!(pooled, vec![2.0, 3.0]);
     }
 
     #[test]

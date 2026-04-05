@@ -5,7 +5,7 @@
 //! - Generate embeddings for sample texts
 //! - Compute cosine similarity between embeddings  
 //! - Batch process multiple texts
-//! - Use different models (BGE-base, Nomic, GTE-large)
+//! - Use different models (BGE-base, multilingual-e5-large, ruri-pt-large)
 //!
 //! ## Prerequisites
 //!
@@ -160,10 +160,16 @@ fn main() -> Result<()> {
     println!("  - bge-base-en-v1.5 (768d) - Better quality");
     println!("  - nomic-embed-text-v1.5 (768d) - Versatile");
     println!("  - gte-large (1024d) - Highest quality");
+    println!("  - multilingual-e5-large (1024d) - Multilingual retrieval");
+    println!("  - ruri-pt-large (1024d) - Japanese retrieval/similarity");
     println!();
     println!("To use a different model:");
     println!("  let config = TextEmbedConfig::bge_base();");
+    println!("  let e5_config = TextEmbedConfig::multilingual_e5_large();");
+    println!("  let ja_config = TextEmbedConfig::ruri_pt_large();");
     println!("  let embedder = LocalTextEmbedder::new(config)?;");
+    println!("  let query_emb = embedder.encode_query(\"検索クエリ\")?;");
+    println!("  let doc_emb = embedder.encode_passage(\"検索対象の文章\")?;");
     println!();
 
     println!("=== Example Complete ===");

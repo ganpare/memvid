@@ -330,10 +330,12 @@ curl -L 'https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.js
 
 | モデル                  | 次元数 | サイズ | 最適な用途               |
 | ----------------------- | ------ | ------ | ------------------------ |
-| `bge-small-en-v1.5`     | 384    | ~120MB | デフォルト（高速・軽量） |
-| `bge-base-en-v1.5`      | 768    | ~420MB | より高い精度が必要な場合 |
-| `nomic-embed-text-v1.5` | 768    | ~530MB | 多目的なタスク           |
-| `gte-large`             | 1024   | ~1.3GB | 最高精度                 |
+| `bge-small-en-v1.5`     | 384    | ~120MB | 英語中心で高速・軽量      |
+| `bge-base-en-v1.5`      | 768    | ~420MB | 英語でより高い精度        |
+| `nomic-embed-text-v1.5` | 768    | ~530MB | 多目的なタスク            |
+| `gte-large`             | 1024   | ~1.3GB | 英語で最高精度            |
+| `multilingual-e5-large` | 1024   | ~2.3GB | 多言語検索向け            |
+| `ruri-pt-large`         | 1024   | 手動    | 日本語検索・類似検索向け  |
 
 ### 他のモデル
 
@@ -364,6 +366,22 @@ curl -L 'https://huggingface.co/thenlper/gte-large/resolve/main/tokenizer.json' 
   -o ~/.cache/memvid/text-models/gte-large_tokenizer.json
 ```
 
+**multilingual-e5-large** (1024次元、多言語検索向け):
+
+```bash
+curl -L 'https://huggingface.co/Xenova/multilingual-e5-large/resolve/main/onnx/model.onnx' \
+  -o ~/.cache/memvid/text-models/multilingual-e5-large.onnx
+curl -L 'https://huggingface.co/intfloat/multilingual-e5-large/resolve/main/tokenizer.json' \
+  -o ~/.cache/memvid/text-models/multilingual-e5-large_tokenizer.json
+```
+
+**ruri-pt-large** (1024次元、日本語検索向け):
+
+```bash
+pip install "optimum[onnxruntime]" transformers huggingface_hub
+python tools/export_ruri_pt_large_onnx.py
+```
+
 ### 使用例
 
 ```rust
@@ -380,7 +398,22 @@ assert_eq!(embedding.len(), 384);
 // モデルを変更する場合
 let config = TextEmbedConfig::bge_base();
 let embedder = LocalTextEmbedder::new(config)?;
+
+// 多言語検索向け
+let config = TextEmbedConfig::multilingual_e5_large();
+let embedder = LocalTextEmbedder::new(config)?;
+let query_embedding = embedder.encode_query("南瓜の家常做法")?;
+let passage_embedding = embedder.encode_passage("1. 清炒南瓜丝 ...")?;
+
+// 日本語検索向け
+let config = TextEmbedConfig::ruri_pt_large();
+let embedder = LocalTextEmbedder::new(config)?;
 ```
+
+`multilingual-e5-large` と `ruri-pt-large` は検索向けの学習をしているため、クエリ側は `encode_query()`、文書側は `encode_passage()` を使うのが前提です。
+
+補助スクリプト `tools/export_ruri_pt_large_onnx.py` は、Optimum の `feature-extraction` export を使って `ruri-pt-large.onnx` と `ruri-pt-large_tokenizer.json` を memvid 向けの名前で生成します。
+`ruri-pt-large` は `tokenizer.json` を公開していないため、このモデルだけ memvid 側で `vocab.txt` ベースの WordPiece tokenizer にフォールバックします。
 
 類似性の計算と検索ランキングを含む完全な例については、`examples/text_embedding.rs` を参照してください。
 

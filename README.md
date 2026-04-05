@@ -359,10 +359,12 @@ curl -L 'https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.js
 
 | Model                   | Dimensions | Size   | Best For        |
 | ----------------------- | ---------- | ------ | --------------- |
-| `bge-small-en-v1.5`     | 384        | ~120MB | Default, fast   |
-| `bge-base-en-v1.5`      | 768        | ~420MB | Better quality  |
-| `nomic-embed-text-v1.5` | 768        | ~530MB | Versatile tasks |
-| `gte-large`             | 1024       | ~1.3GB | Highest quality |
+| `bge-small-en-v1.5`     | 384        | ~120MB | Default, fast English retrieval |
+| `bge-base-en-v1.5`      | 768        | ~420MB | Better English quality |
+| `nomic-embed-text-v1.5` | 768        | ~530MB | Versatile general tasks |
+| `gte-large`             | 1024       | ~1.3GB | Highest quality English retrieval |
+| `multilingual-e5-large` | 1024       | ~2.3GB | Multilingual retrieval |
+| `ruri-pt-large`         | 1024       | manual | Japanese retrieval and similarity |
 
 ### Other Models
 
@@ -390,6 +392,20 @@ curl -L 'https://huggingface.co/thenlper/gte-large/resolve/main/tokenizer.json' 
   -o ~/.cache/memvid/text-models/gte-large_tokenizer.json
 ```
 
+**multilingual-e5-large** (1024 dimensions, multilingual retrieval):
+```bash
+curl -L 'https://huggingface.co/Xenova/multilingual-e5-large/resolve/main/onnx/model.onnx' \
+  -o ~/.cache/memvid/text-models/multilingual-e5-large.onnx
+curl -L 'https://huggingface.co/intfloat/multilingual-e5-large/resolve/main/tokenizer.json' \
+  -o ~/.cache/memvid/text-models/multilingual-e5-large_tokenizer.json
+```
+
+**ruri-pt-large** (1024 dimensions, Japanese retrieval):
+```bash
+pip install "optimum[onnxruntime]" transformers huggingface_hub
+python tools/export_ruri_pt_large_onnx.py
+```
+
 ### Usage in Code
 
 ```rust
@@ -406,7 +422,22 @@ assert_eq!(embedding.len(), 384);
 // Use different model
 let config = TextEmbedConfig::bge_base();
 let embedder = LocalTextEmbedder::new(config)?;
+
+// Multilingual retrieval
+let config = TextEmbedConfig::multilingual_e5_large();
+let embedder = LocalTextEmbedder::new(config)?;
+let query_embedding = embedder.encode_query("南瓜のレシピ")?;
+let passage_embedding = embedder.encode_passage("1. 清炒南瓜丝 ...")?;
+
+// Japanese retrieval / similarity
+let config = TextEmbedConfig::ruri_pt_large();
+let embedder = LocalTextEmbedder::new(config)?;
 ```
+
+For retrieval-oriented models such as `multilingual-e5-large` and `ruri-pt-large`, use `encode_query()` and `encode_passage()` so the recommended prefixes are applied correctly.
+
+The helper script `tools/export_ruri_pt_large_onnx.py` exports `cl-nagoya/ruri-pt-large` with Optimum's `feature-extraction` task and saves the files using memvid's expected names.
+Because `ruri-pt-large` does not publish a `tokenizer.json`, memvid falls back to `vocab.txt`-based WordPiece tokenization for this model.
 
 See `examples/text_embedding.rs` for a complete example with similarity computation and search ranking.
 
